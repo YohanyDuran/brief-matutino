@@ -87,6 +87,7 @@ MOSTRAR_MENCIONES = False
 MIN_MENCIONES = 2
 MAX_MENCIONES = 5
 MAX_ADYACENTES = 6         # tope de la lista 'quizás te interese'
+MOSTRAR_TABLA = True       # resumen de qué se revisó en cada portal
 
 # ---------------------------------------------------------------------------
 # DICCIONARIO DEL PERFIL
@@ -528,6 +529,8 @@ def resumir(vacante: dict) -> str:
     detalle = _empresa_y_lugar(vacante)
     if detalle:
         cabeza += f" — {detalle}"
+    if vacante.get("cupos", 1) > 1:
+        cabeza += f" ({vacante['cupos']} avisos)"
     return f"{cabeza}\n  {vacante['url']}"
 
 
@@ -561,7 +564,7 @@ def recolectar() -> list:
     Si una fuente falla, se anota y se sigue con las demás. Solo si fallan
     TODAS se levanta la excepción.
     """
-    todas, caidas = [], []
+    todas, caidas, resumen = [], [], []
 
     for i, fuente in enumerate(FUENTES):
         if i > 0:
@@ -576,27 +579,77 @@ def recolectar() -> list:
             print(f"  {fuente['nombre']:14} {len(crudas):3} avisos -> "
                   f"{len(chilenas):3} en Chile")
             todas.extend(chilenas)
+            resumen.append({"nombre": fuente["nombre"],
+                            "chile": len(chilenas), "error": False})
         except Exception as e:                      # noqa: BLE001
             print(f"  {fuente['nombre']:14} FALLO: {type(e).__name__}: {str(e)[:70]}")
             caidas.append(fuente["nombre"])
+            resumen.append({"nombre": fuente["nombre"],
+                            "chile": 0, "error": True})
 
     if len(caidas) == len(FUENTES):
         raise RuntimeError(f"Fallaron todas las fuentes: {', '.join(caidas)}")
 
-    # BHP publica el mismo cargo varias veces con IDs distintos (una por cupo).
-    # Se muestra una sola vez: el aviso es el mismo para el que postula.
-    unicas, firmas = [], set()
+    # Algunos portales publican el mismo aviso varias veces, uno por cupo, con
+    # IDs distintos. Se agrupan por el slug de la URL, NO por el cargo: BHP
+    # tiene dos "HV Electrician" que son trabajos distintos (Olympic Dam y
+    # Bowen Basin) y el cargo solo no los distingue; el slug sí.
+    #
+    # No se esconden: se muestra uno y se dice cuántos hay, para que nadie se
+    # pierda una vacante por culpa de la deduplicación.
+    unicas, por_firma = [], {}
     for v in todas:
-        firma = (v["empresa"], normalizar(v["cargo"]))
-        if firma in firmas:
+        slug = re.sub(r"/\d+/?$", "", v["url"].rsplit("/job/", 1)[-1])
+        firma = (v["empresa"], slug or normalizar(v["cargo"]))
+        if firma in por_firma:
+            por_firma[firma]["cupos"] += 1
             continue
-        firmas.add(firma)
+        v["cupos"] = 1
+        por_firma[firma] = v
         unicas.append(v)
 
     if len(unicas) != len(todas):
-        print(f"  (se descartaron {len(todas) - len(unicas)} avisos repetidos)")
+        print(f"  (se agruparon {len(todas) - len(unicas)} avisos repetidos)")
 
-    return unicas
+    # OJO: el resumen cuenta los avisos PUBLICADOS, no los agrupados. Es la
+    # cifra honesta de "cuántas vacantes hay en este portal".
+    return unicas, resumen
+
+
+def tabla_fuentes(resumen: list, evaluadas: list) -> str:
+    """
+    Tabla de lo revisado, empresa por empresa.
+
+    Va entre triples comillas invertidas para que WhatsApp y Telegram la
+    muestren en monoespaciado: con la fuente proporcional de siempre, las
+    columnas no calzarían.
+
+    Se muestra aunque no haya resultados. Ese es justamente el punto: saber
+    que el agente salió a buscar y qué encontró en cada portal.
+    """
+    def contar(empresa, nivel):
+        return sum(1 for v in evaluadas
+                   if v["empresa"] == empresa and v["nivel"] == nivel)
+
+    lineas = ["Empresa       Vac Calza Cerca"]
+    tot_v = tot_c = tot_a = 0
+
+    for fila in resumen:
+        nombre = fila["nombre"][:13]
+        if fila["error"]:
+            lineas.append(f"{nombre:<13} {'err':>3} {'-':>5} {'-':>5}")
+            continue
+        calza = contar(fila["nombre"], "calza")
+        cerca = contar(fila["nombre"], "adyacente")
+        tot_v += fila["chile"]
+        tot_c += calza
+        tot_a += cerca
+        lineas.append(f"{nombre:<13} {fila['chile']:>3} {calza:>5} {cerca:>5}")
+
+    lineas.append("-" * 30)
+    lineas.append(f"{'TOTAL':<13} {tot_v:>3} {tot_c:>5} {tot_a:>5}")
+
+    return "```\n" + "\n".join(lineas) + "\n```"
 
 
 def bloque_vacantes(estado: dict, hoy: date) -> str:
@@ -616,7 +669,7 @@ def bloque_vacantes(estado: dict, hoy: date) -> str:
         if _fecha_valida(f) and date.fromisoformat(f) > limite
     }
 
-    todas = recolectar()
+    todas, resumen = recolectar()
     evaluadas = [evaluar(v) for v in todas]
     evaluadas.sort(key=lambda v: v["puntaje"], reverse=True)
 
@@ -670,6 +723,9 @@ def bloque_vacantes(estado: dict, hoy: date) -> str:
             "_Solo mencionan tus palabras clave, el cargo es de otra área:_\n"
             + "\n".join(f"• {resumir(v)}" for v in secundarias[:MAX_MENCIONES])
         )
+
+    if MOSTRAR_TABLA:
+        partes.append(tabla_fuentes(resumen, evaluadas))
 
     # Se marcan como vistas DESPUÉS de armar el texto, para que el 🆕 salga
     # bien en este mensaje.
