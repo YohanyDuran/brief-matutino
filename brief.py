@@ -3,7 +3,7 @@
 """
 BRIEF MATUTINO — Fase 2
 =======================
-Arma y envía por Telegram un mensaje diario con:
+Arma y envía por Telegram y WhatsApp un mensaje diario con:
   1. Saludo + fecha en español
   2. Clima del día (Open-Meteo, gratis y sin API key)
   3. Frase motivadora (sin repetir en 60 días)
@@ -19,6 +19,7 @@ avisa qué falló. Nunca se cae entero por un pedazo.
 import json
 import os
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -45,6 +46,10 @@ HORA_MAX = 9
 # Secretos: se leen de variables de entorno (GitHub Secrets)
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+# WhatsApp vía CallMeBot. Si faltan estos dos, el canal se salta solo.
+WA_TELEFONO = os.environ.get("CALLMEBOT_PHONE", "")
+WA_APIKEY = os.environ.get("CALLMEBOT_APIKEY", "")
 
 # Rutas
 RAIZ = Path(__file__).parent
@@ -219,20 +224,21 @@ def bloque_palabra(estado: dict, hoy: date) -> str:
 
 
 # ---------------------------------------------------------------------------
-# ENVÍO POR TELEGRAM
+# ENVÍO — TELEGRAM Y WHATSAPP
 # ---------------------------------------------------------------------------
 
+LIMITE_WHATSAPP = 1500  # CallMeBot viaja por URL: mejor trozos cortos
 LIMITE_TELEGRAM = 4000  # el máximo real es 4096; dejamos holgura
 
 
-def partir_mensaje(texto: str) -> list:
+def partir_mensaje(texto: str, limite: int = LIMITE_TELEGRAM) -> list:
     """Corta en trozos respetando los saltos de línea dobles (bloques)."""
-    if len(texto) <= LIMITE_TELEGRAM:
+    if len(texto) <= limite:
         return [texto]
 
     partes, actual = [], ""
     for bloque in texto.split("\n\n"):
-        if len(actual) + len(bloque) + 2 > LIMITE_TELEGRAM:
+        if len(actual) + len(bloque) + 2 > limite:
             partes.append(actual.strip())
             actual = bloque + "\n\n"
         else:
@@ -242,7 +248,7 @@ def partir_mensaje(texto: str) -> list:
     return partes
 
 
-def enviar(texto: str) -> bool:
+def enviar_telegram(texto: str) -> bool:
     """
     Envía por Telegram. Intenta con formato Markdown; si Telegram lo rechaza
     (algún carácter suelto rompe el parser), reintenta en texto plano.
@@ -274,6 +280,77 @@ def enviar(texto: str) -> bool:
             ok_total = False
 
     return ok_total
+
+
+def enviar_whatsapp(texto: str) -> bool:
+    """
+    Envía por WhatsApp usando CallMeBot: gratis y sin las plantillas que exige
+    la API oficial de Meta para mensajes no solicitados.
+
+    No hace falta convertir el formato: WhatsApp usa los mismos símbolos que
+    Markdown para negrita (*así*) y cursiva (_así_).
+
+    CallMeBot limita la frecuencia de envío, así que si el mensaje va partido
+    esperamos unos segundos entre trozo y trozo.
+    """
+    if not WA_TELEFONO or not WA_APIKEY:
+        print("ERROR: faltan CALLMEBOT_PHONE o CALLMEBOT_APIKEY")
+        return False
+
+    url = "https://api.callmebot.com/whatsapp.php"
+    ok_total = True
+
+    for i, parte in enumerate(partir_mensaje(texto, LIMITE_WHATSAPP)):
+        if i > 0:
+            time.sleep(6)   # respeta el límite de frecuencia de CallMeBot
+        try:
+            r = requests.get(
+                url,
+                params={"phone": WA_TELEFONO, "text": parte, "apikey": WA_APIKEY},
+                timeout=30,
+            )
+            # CallMeBot responde 200 igual cuando hay error, con el detalle
+            # dentro del cuerpo. Por eso revisamos las dos cosas.
+            cuerpo = r.text[:200]
+            if r.status_code != 200 or "ERROR" in cuerpo.upper():
+                print(f"CallMeBot respondió {r.status_code}: {cuerpo}")
+                ok_total = False
+        except requests.RequestException as e:
+            print(f"Error de red al enviar por WhatsApp: {e}")
+            ok_total = False
+
+    return ok_total
+
+
+def enviar(texto: str) -> bool:
+    """
+    Manda el brief por todos los canales que estén configurados.
+
+    Devuelve True si AL MENOS UNO llegó. Así, si WhatsApp falla pero Telegram
+    funciona, el día igual se marca como enviado y mañana no se repite.
+    Un canal sin secretos no cuenta como falla: simplemente no se usa.
+    """
+    resultados = []
+
+    if TOKEN and CHAT_ID:
+        ok = enviar_telegram(texto)
+        print(f"Telegram: {'enviado' if ok else 'FALLÓ'}")
+        resultados.append(ok)
+    else:
+        print("Telegram: sin secretos configurados, se salta.")
+
+    if WA_TELEFONO and WA_APIKEY:
+        ok = enviar_whatsapp(texto)
+        print(f"WhatsApp: {'enviado' if ok else 'FALLÓ'}")
+        resultados.append(ok)
+    else:
+        print("WhatsApp: sin secretos configurados, se salta.")
+
+    if not resultados:
+        print("ERROR: no hay ningún canal configurado.")
+        return False
+
+    return any(resultados)
 
 
 # ---------------------------------------------------------------------------
