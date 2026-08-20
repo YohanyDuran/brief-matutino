@@ -86,25 +86,90 @@ DIAS_RECORDAR = 30
 MOSTRAR_MENCIONES = False
 MIN_MENCIONES = 2
 MAX_MENCIONES = 5
+MAX_ADYACENTES = 6         # tope de la lista 'quizás te interese'
 
-# Perfil objetivo. Se buscan como frases completas, sin tildes y en minúscula.
+# ---------------------------------------------------------------------------
+# DICCIONARIO DEL PERFIL
+# ---------------------------------------------------------------------------
+# Todo se compara normalizado: sin tildes, en minúscula y como frase completa
+# con límites de palabra. Por eso van sin tilde y en singular/plural cuando el
+# plural no se deduce solo.
+
+# NIVEL 1 — El cargo ES del rubro. Se muestra completo, con 🆕.
 PALABRAS_CLAVE = [
-    "mejora continua",
-    "excelencia operacional",
-    "operational excellence",
-    "lean manufacturing",
-    "lean",
-    "six sigma",
-    "agente de cambio",
-    "change management",
-    "gestion del cambio",
-    "productividad",
-    "optimizacion de procesos",
-    "continuous improvement",
-    "business process",
-    "transformacion operacional",
-    "mejoramiento continuo",
-    "process improvement",
+    # --- Mejora continua, todas sus formas ---
+    "mejora continua", "mejoras continuas", "mejoramiento continuo",
+    "mejora de procesos", "mejora operacional", "mejora de gestion",
+    "continuous improvement", "continual improvement",
+    "process improvement", "business process improvement",
+    "performance improvement", "productivity improvement",
+    "kaizen",
+
+    # --- Excelencia operacional ---
+    "excelencia operacional", "excelencia operativa", "excelencia de procesos",
+    "excelencia en gestion", "excelencia del negocio",
+    "operational excellence", "operations excellence", "operating excellence",
+    "business excellence", "process excellence", "manufacturing excellence",
+
+    # --- Lean / Six Sigma / WCM ---
+    "lean", "lean manufacturing", "lean management", "lean construction",
+    "lean six sigma", "six sigma", "6 sigma", "black belt", "green belt",
+    "world class manufacturing", "wcm", "tps",
+
+    # --- Gestión y agentes de cambio ---
+    "agente de cambio", "agentes de cambio", "gestion del cambio",
+    "gestion de cambio", "change management", "change agent",
+    "organizational change", "cambio organizacional",
+
+    # --- Optimización y reingeniería ---
+    "optimizacion de procesos", "optimizacion operacional",
+    "optimizacion de gestion", "reingenieria de procesos", "reingenieria",
+    "process optimization", "process optimisation", "process reengineering",
+    "estandarizacion de procesos", "standardization of processes",
+
+    # --- Productividad y eficiencia ---
+    "productividad", "productivity", "eficiencia operacional",
+    "eficiencia de procesos", "operational efficiency",
+
+    # --- Transformación ---
+    "transformacion operacional", "transformacion de procesos",
+    "transformacion del negocio", "operational transformation",
+    "business transformation", "transformation",
+
+    # --- Gestión de procesos de negocio ---
+    "business process", "business process management", "bpm",
+    "gestion de procesos de negocio",
+]
+
+# NIVEL 2 — Adyacentes. El cargo no es del rubro, pero está al lado y vale la
+# pena echarle un ojo. Se muestran aparte, en una línea, sin 🆕.
+PALABRAS_ADYACENTES = [
+    # Gestión y procesos en general
+    "ingeniero de gestion", "ingeniera de gestion", "control de gestion",
+    "gerente de procesos", "jefe de procesos", "ingeniero de procesos",
+    "superintendente de procesos", "analista de procesos",
+    "process engineer", "process manager", "gestion de operaciones",
+
+    # Puesta en marcha y preparación operacional
+    "operational readiness", "preparacion operacional", "puesta en marcha",
+    "commissioning", "ramp up", "rampa de produccion",
+
+    # Planificación y gestión del trabajo
+    "planificacion y control", "work management", "planning and control",
+    "gestion del trabajo", "programacion y control",
+
+    # Proyectos y estrategia
+    "pmo", "project management office", "oficina de proyectos",
+    "gestion de proyectos", "estrategia operacional", "planificacion estrategica",
+
+    # Datos y automatización aplicados a operaciones
+    "transformacion digital", "digital transformation",
+    "automatizacion de procesos", "process automation",
+    "analitica operacional", "operational analytics",
+
+    # Confiabilidad y mantenimiento de clase mundial
+    "confiabilidad operacional", "operational reliability",
+    "mantenimiento de clase mundial", "tpm",
 ]
 
 # Señales de que una vacante es en Chile. Se aplica solo a los portales
@@ -282,6 +347,14 @@ def listar_rmk(fuente: dict) -> list:
             if not cargo:
                 continue
 
+            # BHP escribe el cargo como "Principal PMO | BHP Chile": la
+            # ubicación va dentro del título. Se separa, si no el mensaje
+            # termina repitiendo el nombre de la empresa tres veces.
+            sufijo_ubicacion = ""
+            if " | " in cargo:
+                cargo, _, sufijo_ubicacion = cargo.partition(" | ")
+                cargo = cargo.strip()
+
             vistos.add(job_id)
             nuevos_en_pagina += 1
 
@@ -292,7 +365,9 @@ def listar_rmk(fuente: dict) -> list:
                 "id": job_id,
                 "cargo": html.unescape(cargo),
                 "empresa": fuente["nombre"],
-                "contexto": html.unescape(contexto),
+                "contexto": html.unescape(
+                    (sufijo_ubicacion + " | " + contexto) if sufijo_ubicacion
+                    else contexto),
                 "url": _url_segura(html.unescape(
                     ruta if ruta.startswith("http") else base + ruta)),
                 # Se completan en detallar(), solo para las que calzan:
@@ -367,13 +442,16 @@ def detallar(vacante: dict) -> dict:
 
 def evaluar(vacante: dict) -> dict:
     """
-    Clasifica la vacante en tres niveles:
+    Clasifica la vacante en cuatro niveles:
 
-      "calza"   La palabra clave está en el CARGO. Es del rubro que buscas.
-      "mencion" Aparece solo en el resto de la fila. Ojo: las mineras ponen
-                "mejora continua" de relleno en casi todo, así que esto NO
-                significa que el cargo sea del rubro.
-      "no"      No aplica.
+      "calza"     Palabra clave del NIVEL 1 en el CARGO. Es del rubro que
+                  buscas. Se muestra completa, con 🆕.
+      "adyacente" Palabra clave del NIVEL 2 en el CARGO. No es del rubro pero
+                  está al lado. Va en una lista aparte, de una línea.
+      "mencion"   El cargo no tiene nada, pero el aviso nombra tus palabras
+                  clave. Ojo: las mineras ponen "mejora continua" de relleno
+                  en casi todo. Apagado por defecto.
+      "no"        No aplica.
 
     Por qué el título manda: un "Superintendente de Fundición" puede nombrar
     mejora continua tres veces y aun así no ser un cargo de mejora continua.
@@ -383,14 +461,18 @@ def evaluar(vacante: dict) -> dict:
     resto = normalizar(vacante.get("contexto", "") + " " + vacante.get("descripcion", ""))
 
     en_titulo = [k for k in PALABRAS_CLAVE if contiene_frase(titulo, k)]
+    adyacentes = [k for k in PALABRAS_ADYACENTES if contiene_frase(titulo, k)]
     en_resto = [k for k in PALABRAS_CLAVE if contiene_frase(resto, k)]
 
     vacante["hits_titulo"] = en_titulo
+    vacante["hits_adyacentes"] = adyacentes
     vacante["hits_resto"] = en_resto
-    vacante["puntaje"] = len(en_titulo) * 10 + len(en_resto)
+    vacante["puntaje"] = len(en_titulo) * 100 + len(adyacentes) * 10 + len(en_resto)
 
     if en_titulo:
         vacante["nivel"] = "calza"
+    elif adyacentes:
+        vacante["nivel"] = "adyacente"
     elif len(en_resto) >= MIN_MENCIONES:
         vacante["nivel"] = "mencion"
     else:
@@ -428,12 +510,24 @@ def _ubicacion(vacante: dict) -> str:
     return ""
 
 
+def _empresa_y_lugar(vacante: dict) -> str:
+    """
+    'Empresa · Lugar', sin repetir. Algunos portales ya nombran la empresa en
+    la ubicación ('BHP Chile'), y no hay que decirlo dos veces.
+    """
+    empresa = vacante["empresa"]
+    lugar = _ubicacion(vacante)
+    if lugar and normalizar(empresa) in normalizar(lugar):
+        return lugar
+    return " · ".join(x for x in [empresa, lugar] if x)
+
+
 def resumir(vacante: dict) -> str:
-    """Una línea para las menciones: cargo, dónde, y el link."""
-    ubicacion = _ubicacion(vacante)
-    cabeza = f"{vacante['cargo']} ({vacante['empresa']})"
-    if ubicacion:
-        cabeza += f" — {ubicacion}"
+    """Una línea para los adyacentes y las menciones: cargo, dónde y el link."""
+    cabeza = vacante["cargo"]
+    detalle = _empresa_y_lugar(vacante)
+    if detalle:
+        cabeza += f" — {detalle}"
     return f"{cabeza}\n  {vacante['url']}"
 
 
@@ -441,7 +535,7 @@ def formatear(vacante: dict, es_nueva: bool) -> str:
     marca = "🆕 " if es_nueva else ""
     lineas = [f"{marca}*{vacante['cargo']}*"]
 
-    detalle = " · ".join(x for x in [vacante["empresa"], _ubicacion(vacante)] if x)
+    detalle = _empresa_y_lugar(vacante)
     if detalle:
         lineas.append(detalle)
 
@@ -489,7 +583,20 @@ def recolectar() -> list:
     if len(caidas) == len(FUENTES):
         raise RuntimeError(f"Fallaron todas las fuentes: {', '.join(caidas)}")
 
-    return todas
+    # BHP publica el mismo cargo varias veces con IDs distintos (una por cupo).
+    # Se muestra una sola vez: el aviso es el mismo para el que postula.
+    unicas, firmas = [], set()
+    for v in todas:
+        firma = (v["empresa"], normalizar(v["cargo"]))
+        if firma in firmas:
+            continue
+        firmas.add(firma)
+        unicas.append(v)
+
+    if len(unicas) != len(todas):
+        print(f"  (se descartaron {len(todas) - len(unicas)} avisos repetidos)")
+
+    return unicas
 
 
 def bloque_vacantes(estado: dict, hoy: date) -> str:
@@ -514,9 +621,10 @@ def bloque_vacantes(estado: dict, hoy: date) -> str:
     evaluadas.sort(key=lambda v: v["puntaje"], reverse=True)
 
     calzan = [v for v in evaluadas if v["nivel"] == "calza"]
+    adyacentes = [v for v in evaluadas if v["nivel"] == "adyacente"]
     menciones = [v for v in evaluadas if v["nivel"] == "mencion"]
-    print(f"Total en Chile: {len(todas)} | Calzan en el cargo: {len(calzan)}"
-          f" | Menciones: {len(menciones)}")
+    print(f"Total en Chile: {len(todas)} | Calzan: {len(calzan)}"
+          f" | Adyacentes: {len(adyacentes)} | Menciones: {len(menciones)}")
 
     # El detalle cuesta un request por aviso, así que solo se abren las que
     # calzan: nunca son muchas, y son las únicas que se muestran completas.
@@ -528,13 +636,15 @@ def bloque_vacantes(estado: dict, hoy: date) -> str:
     vistas = estado["vacantes_enviadas"]
     es_domingo = hoy.weekday() == 6
 
+    nuevo = lambda lista: [v for v in lista if v["id"] not in vistas]  # noqa: E731
+
     if es_domingo:
         titulo = "💼 *Resumen semanal de vacantes*"
-        principales, secundarias = calzan, menciones
+        principales, cercanas, secundarias = calzan, adyacentes, menciones
     else:
         titulo = "💼 *Vacantes*"
-        principales = [v for v in calzan if v["id"] not in vistas]
-        secundarias = [v for v in menciones if v["id"] not in vistas]
+        principales, cercanas, secundarias = (
+            nuevo(calzan), nuevo(adyacentes), nuevo(menciones))
 
     partes = [titulo]
 
@@ -549,6 +659,12 @@ def bloque_vacantes(estado: dict, hoy: date) -> str:
     else:
         partes.append("Hoy no hay vacantes nuevas con tu perfil en el cargo.")
 
+    if cercanas:
+        partes.append(
+            "_Quizás te interese — cargos del área de al lado:_\n"
+            + "\n".join(f"• {resumir(v)}" for v in cercanas[:MAX_ADYACENTES])
+        )
+
     if MOSTRAR_MENCIONES and secundarias:
         partes.append(
             "_Solo mencionan tus palabras clave, el cargo es de otra área:_\n"
@@ -557,7 +673,9 @@ def bloque_vacantes(estado: dict, hoy: date) -> str:
 
     # Se marcan como vistas DESPUÉS de armar el texto, para que el 🆕 salga
     # bien en este mensaje.
-    for vacante in principales[:MAX_EN_MENSAJE] + secundarias[:MAX_MENCIONES]:
+    mostradas = (principales[:MAX_EN_MENSAJE] + cercanas[:MAX_ADYACENTES]
+                 + (secundarias[:MAX_MENCIONES] if MOSTRAR_MENCIONES else []))
+    for vacante in mostradas:
         vistas[vacante["id"]] = hoy.isoformat()
 
     return "\n\n".join(partes)
