@@ -1,1 +1,3 @@
 requests>=2.31.0
+# Solo se instala en Windows: Linux ya trae la base de zonas horarias.
+tzdata; sys_platform == "win32"

@@ -43,7 +43,34 @@ DIAS_SIN_REPETIR = 60                 # ventana anti-repetición
 HORA_MIN = 6
 HORA_MAX = 9
 
-# Secretos: se leen de variables de entorno (GitHub Secrets)
+def cargar_dotenv() -> None:
+    """
+    Lee un archivo .env que esté al lado del script y lo carga en el entorno.
+
+    Sirve para correr fuera de GitHub Actions — PythonAnywhere, tu propio PC —
+    donde no existen los Secrets. Si el archivo no está, no hace nada.
+
+    Lo que ya venga definido en el entorno manda: el .env nunca lo pisa. Así,
+    en Actions se siguen usando los Secrets aunque alguien suba un .env por error.
+    """
+    archivo = Path(__file__).parent / ".env"
+    if not archivo.exists():
+        return
+
+    for linea in archivo.read_text(encoding="utf-8").splitlines():
+        linea = linea.strip()
+        if not linea or linea.startswith("#") or "=" not in linea:
+            continue
+        clave, _, valor = linea.partition("=")
+        clave = clave.strip()
+        valor = valor.strip().strip("\"'")
+        if clave and clave not in os.environ:
+            os.environ[clave] = valor
+
+
+cargar_dotenv()
+
+# Secretos: se leen del entorno (GitHub Secrets) o del archivo .env
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 

@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 
-# Variables de entorno
+# Variables de entorno: el .env real NUNCA se sube.
 .env
 .env.*
+# La plantilla si, porque no tiene datos reales.
+!.env.ejemplo
