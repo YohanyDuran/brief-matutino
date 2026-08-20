@@ -1,0 +1,60 @@
+# ============================================================================
+#  Brief matutino — GitHub Actions
+#  Este archivo va en tu repo en:  .github/workflows/brief.yml
+# ============================================================================
+
+name: Brief matutino
+
+on:
+  schedule:
+    # Los cron de GitHub son SIEMPRE en UTC y no siguen el horario de Chile.
+    # Por eso hay dos: uno sirve en verano (UTC-3) y otro en invierno (UTC-4).
+    # El script decide cuál corresponde mirando la hora local de Santiago,
+    # y el registro de "ultimo_envio" impide que se envíe dos veces el mismo día.
+    - cron: '15 10 * * *'   # 07:15 en Chile durante el horario de verano
+    - cron: '15 11 * * *'   # 07:15 en Chile durante el horario de invierno
+
+  # Botón para ejecutarlo a mano desde la pestaña Actions (para probar).
+  workflow_dispatch:
+
+# Necesario para que el job pueda hacer commit del estado de vuelta al repo.
+permissions:
+  contents: write
+
+jobs:
+  enviar-brief:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Instalar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar el brief
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python brief.py
+
+      - name: Guardar el estado actualizado
+        # Este commit diario tiene un efecto secundario muy útil: mantiene el
+        # repositorio "activo", así GitHub nunca desactiva el cron por los
+        # 60 días de inactividad.
+        run: |
+          git config user.name "brief-bot"
+          git config user.email "brief-bot@users.noreply.github.com"
+          git add datos/estado.json
+          # Si no hubo cambios, "git commit" falla; con este if no rompemos el job.
+          if git diff --staged --quiet; then
+            echo "Sin cambios en el estado."
+          else
+            git commit -m "Estado del brief: $(date -u +%Y-%m-%d)"
+            git push
+          fi
