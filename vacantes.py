@@ -6,28 +6,42 @@ VACANTES — Fase 3
 Busca ofertas laborales en los portales oficiales de la gran minería y
 devuelve el bloque de texto listo para pegar en el brief matutino.
 
-Fuentes implementadas:
-  - Codelco (todas las divisiones), vía https://empleos.codelco.cl
+SCRAPER B — SAP SuccessFactors RMK
+-----------------------------------
+Las cinco empresas de abajo corren sobre el mismo motor (SuccessFactors
+Recruiting Marketing, ex Jobs2Web), así que comparten un solo scraper.
+
+Codelco estaba clasificada en el CLAUDE.md como "Scraper A / career8", pero
+sus enlaces internos apuntan a jobs2web con `?locale=`: es RMK, y va acá.
 
 SOBRE robots.txt — leer antes de agregar fuentes
 ------------------------------------------------
-`career8.successfactors.com` prohíbe TODO rastreo:
+`career8.successfactors.com` prohíbe TODO rastreo (`Disallow: /`, solo
+`/login` permitido), así que NO se usa pese a ser el portal de fondo. Las
+cinco entradas públicas de acá comparten un robots.txt permisivo, idéntico
+entre ellas, que solo bloquea rutas funcionales:
 
-    User-agent: *
-    Disallow: /
-    Allow: /login
+    Disallow: /applybutton/  /talentcommunity/  /emailsubscribe/
+    Disallow: /services/     /preapply/         /unsubscribe/
+    Disallow: /error         /reset/            /email/image/
 
-Por eso NO se usa, aunque sea el portal que está detrás. En su lugar se usa
-`empleos.codelco.cl`, la entrada pública, cuyo robots.txt solo bloquea rutas
-funcionales (/services/, /applybutton/, /talentcommunity/, /preapply/, ...)
-y deja libre la búsqueda de ofertas.
+La búsqueda de ofertas NO está bloqueada. Verificado sitio por sitio.
 
-No existe API JSON ni feed RSS: se comprobó uno por uno. Por eso se parsea
-HTML, que la regla 4 del proyecto permite solo cuando no hay alternativa.
+No existe API JSON ni feed RSS en ninguna: se probaron /tile-search-results/,
+/search-results/, ?format=json, RSS y JSON-LD. Por eso se parsea HTML, que la
+regla 4 del proyecto permite solo cuando no hay alternativa.
 
-FILOSOFÍA DE ERRORES: igual que el resto del brief. Si esto falla, revienta
-hacia arriba y `main()` lo reporta como fuente caída, pero el mensaje se
-envía igual con los otros bloques.
+DOS VISTAS DISTINTAS
+--------------------
+RMK se configura por cliente y hay dos maquetados:
+  - Tarjetas  (`li.job-tile`)   → Codelco, Lundin
+  - Tabla     (`tr.data-row`)   → BHP, Kinross
+El extractor busca los enlaces `/job/` y sube hasta la fila que los contiene,
+así funciona con ambos sin código separado por empresa.
+
+FILOSOFÍA DE ERRORES: si una fuente se cae, las demás siguen. Solo si fallan
+TODAS se levanta la excepción, y ahí `main()` lo reporta como fuente caída
+pero el brief se envía igual con los otros bloques.
 """
 
 import html
@@ -40,15 +54,19 @@ import requests
 from bs4 import BeautifulSoup
 
 # ---------------------------------------------------------------------------
-# CONFIGURACIÓN
+# FUENTES
 # ---------------------------------------------------------------------------
 
-# Solo el fragmento con la lista de avisos, no la página entera.
-URL_LISTADO = "https://empleos.codelco.cl/tile-search-results/"
-URL_BASE = "https://empleos.codelco.cl"
+# solo_chile=True  -> el portal ya publica únicamente vacantes en Chile.
+# solo_chile=False -> es un portal global; hay que filtrar por ubicación.
+FUENTES = [
+    {"nombre": "Codelco",       "base": "https://empleos.codelco.cl",       "solo_chile": True},
+    {"nombre": "BHP",           "base": "https://careers.bhp.com",          "solo_chile": False},
+    {"nombre": "Teck",          "base": "https://jobs.teck.com",            "solo_chile": False},
+    {"nombre": "Kinross",       "base": "https://jobs.kinross.com",         "solo_chile": False},
+    {"nombre": "Lundin Mining", "base": "https://jobs.lundinmining.com",    "solo_chile": False},
+]
 
-# User-Agent identificable, como exige la regla 5. Sin datos personales: el
-# repositorio es público.
 CABECERAS = {
     "User-Agent": (
         "BriefMatutino/1.0 "
@@ -56,17 +74,18 @@ CABECERAS = {
     )
 }
 
-TIMEOUT = 25
-PAUSA_ENTRE_AVISOS = 1.5   # segundos; no martillar el servidor
-MAX_DETALLES = 15          # tope duro de requests de detalle por corrida
-MAX_EN_MENSAJE = 10        # tope de vacantes mostradas, según requisitos
-DIAS_RECORDAR = 30         # cuánto tiempo se recuerda una vacante ya enviada
+TIMEOUT = 30
+PAUSA = 1.5                # segundos entre requests; no martillar
+PAGINAS_POR_FUENTE = 3     # RMK pagina de a 25; 3 páginas ≈ 75 avisos
+MAX_DETALLES = 8           # solo se abre el aviso de las que calzan
+MAX_EN_MENSAJE = 10
+DIAS_RECORDAR = 30
 
-# Las que solo mencionan el perfil en la descripción van en una lista aparte,
-# de una línea cada una. Pon MOSTRAR_MENCIONES = False para no verlas nunca.
-MOSTRAR_MENCIONES = True
-MIN_MENCIONES = 2          # palabras clave distintas exigidas en la descripción
-MAX_MENCIONES = 5          # tope de menciones listadas
+# Las que solo nombran tus palabras clave en la fila del listado, sin tenerlas
+# en el cargo. Resultaron ruidosas, así que van apagadas por defecto.
+MOSTRAR_MENCIONES = False
+MIN_MENCIONES = 2
+MAX_MENCIONES = 5
 
 # Perfil objetivo. Se buscan como frases completas, sin tildes y en minúscula.
 PALABRAS_CLAVE = [
@@ -84,6 +103,21 @@ PALABRAS_CLAVE = [
     "continuous improvement",
     "business process",
     "transformacion operacional",
+    "mejoramiento continuo",
+    "process improvement",
+]
+
+# Señales de que una vacante es en Chile. Se aplica solo a los portales
+# globales: nombres de faena chilena, regiones, ciudades y el código de país.
+SENALES_CHILE = [
+    "chile", "escondida", "spence", "cerro colorado", "quebrada blanca",
+    "carmen de andacollo", "andacollo", "candelaria", "caserones",
+    "la coipa", "lobo-marte", "lobo marte", "collahuasi", "salares norte",
+    "antofagasta", "calama", "copiapo", "santiago", "iquique", "rancagua",
+    "los andes", "valparaiso", "la serena", "coquimbo", "vallenar",
+    "diego de almagro", "el salvador", "chuquicamata",
+    # OJO: no agregar "region" a secas. Matcheaba "Inchiri region,
+    # Mauritania" y colaba vacantes africanas de Kinross.
 ]
 
 MESES_ABREV = {
@@ -124,8 +158,8 @@ def _url_segura(url: str) -> str:
     Deja la URL en una forma que WhatsApp y Telegram reconozcan entera.
 
     Los avisos de Codelco incluyen nombres como "Bernardo O'Higgins". Si el
-    apóstrofo va crudo, WhatsApp corta el enlace ahí y el link queda inútil.
-    Lo mismo con espacios, comillas y paréntesis. Se codifican de vuelta.
+    apóstrofo va crudo, WhatsApp corta el enlace ahí y queda inútil. Lo mismo
+    con espacios, comillas y paréntesis. Se codifican de vuelta.
     """
     reemplazos = {
         "'": "%27", '"': "%22", " ": "%20",
@@ -136,13 +170,18 @@ def _url_segura(url: str) -> str:
     return url
 
 
-def _fecha_valida(texto: str) -> bool:
-    """True si el texto es una fecha ISO legible. Las corruptas se descartan."""
-    try:
-        date.fromisoformat(texto)
+def es_de_chile(texto: str) -> bool:
+    """
+    True si la fila del aviso apunta a Chile.
+
+    Se usa solo en los portales globales. Lundin, por ejemplo, escribe la
+    ubicación como 'Copiapó, AT, CL' vs 'Alto Horizonte, GO, BR', así que el
+    código de país de dos letras es la señal más confiable cuando está.
+    """
+    t = normalizar(texto)
+    if re.search(r",\s*cl\b", t):
         return True
-    except (ValueError, TypeError):
-        return False
+    return any(s in t for s in SENALES_CHILE)
 
 
 MESES_LARGOS = ("enero|febrero|marzo|abril|mayo|junio|julio|agosto|"
@@ -156,6 +195,15 @@ def _parece_fecha(texto: str) -> bool:
     """
     t = normalizar(texto)
     return bool(re.search(MESES_LARGOS, t) and re.search(r"\b\d{4}\b", t))
+
+
+def _fecha_valida(texto: str) -> bool:
+    """True si el texto es una fecha ISO legible. Las corruptas se descartan."""
+    try:
+        date.fromisoformat(texto)
+        return True
+    except (ValueError, TypeError):
+        return False
 
 
 def parsear_fecha(texto: str):
@@ -173,7 +221,7 @@ def parsear_fecha(texto: str):
 
 
 # ---------------------------------------------------------------------------
-# DESCARGA
+# DESCARGA Y EXTRACCIÓN
 # ---------------------------------------------------------------------------
 
 def _pedir(url: str) -> str:
@@ -182,77 +230,90 @@ def _pedir(url: str) -> str:
     return respuesta.text
 
 
-def _texto_del_campo(tile, clase: str) -> str:
+def _fila_contenedora(enlace):
     """
-    Saca el valor de un campo del aviso, quitándole la etiqueta.
+    Sube desde el enlace del cargo hasta la fila que lo contiene.
 
-    En el HTML cada campo viene como:
-        <div class="section-field date">
-            <span class="section-label">Fecha</span> 20 ago 2026
-        </div>
+    Ojo: NO cortar al ver 'job' en la clase. En Kinross el propio enlace vive
+    dentro de un <span class="jobTitle">, y cortar ahí devuelve solo el título
+    sin la ubicación ni la fecha. Se sube hasta un <tr> o <li> de verdad.
     """
-    elemento = tile.select_one(f".section-field.{clase}")
-    if not elemento:
-        return ""
-    etiqueta = elemento.select_one(".section-label")
-    if etiqueta:
-        etiqueta.extract()
-    return re.sub(r"\s+", " ", elemento.get_text(" ", strip=True)).strip()
+    nodo = enlace
+    for _ in range(8):
+        if nodo.parent is None:
+            break
+        nodo = nodo.parent
+        clases = " ".join(nodo.get("class", []))
+        if nodo.name in ("tr", "li") or "job-tile" in clases or "data-row" in clases:
+            return nodo
+    return enlace.parent or enlace
 
 
-def listar_codelco() -> list:
+def listar_rmk(fuente: dict) -> list:
     """
-    Trae TODAS las vacantes abiertas en un solo request.
+    Trae las vacantes de un portal RMK, paginando de a una página por request.
 
-    A propósito no se usa el buscador del servidor (`?q=`): se comprobó que
-    hace match difuso por palabra suelta y devuelve casi todo el catálogo.
-    El filtrado se hace acá, que es predecible.
+    Funciona con las dos vistas del motor (tarjetas y tabla) porque se apoya
+    en los enlaces `/job/`, que están en ambas, y no en un maquetado concreto.
     """
-    # Ojo: no llamar 'html' a esta variable, taparía al módulo html.
-    fragmento = _pedir(f"{URL_LISTADO}?q=&startrow=0")
-    sopa = BeautifulSoup(f"<ul>{fragmento}</ul>", "html.parser")
+    base = fuente["base"]
+    vacantes, vistos = [], set()
 
-    vacantes = []
-    for tile in sopa.select("li.job-tile"):
-        enlace = tile.select_one("a.jobTitle-link")
-        if not enlace:
-            continue
+    for pagina in range(PAGINAS_POR_FUENTE):
+        if pagina > 0:
+            time.sleep(PAUSA)
 
-        ruta = tile.get("data-url") or enlace.get("href") or ""
-        if not ruta:
-            continue
+        sopa = BeautifulSoup(
+            _pedir(f"{base}/search/?q=&startrow={pagina * 25}"), "html.parser"
+        )
 
-        # El id va en una clase tipo "job-id-1421576700". Es estable, y es
-        # lo que usamos para deduplicar.
-        clases = " ".join(tile.get("class", []))
-        m_id = re.search(r"job-id-(\d+)", clases)
+        nuevos_en_pagina = 0
+        for enlace in sopa.select('a[href*="/job/"]'):
+            ruta = enlace.get("href", "")
+            m = re.search(r"/job/[^/]*?/(\d+)/?", ruta)
+            if not m:
+                continue
 
-        vacantes.append({
-            "id": m_id.group(1) if m_id else ruta,
-            "cargo": html.unescape(enlace.get_text(" ", strip=True)),
-            "empresa": "Codelco",
-            "region": _texto_del_campo(tile, "customfield2"),
-            "proceso": _texto_del_campo(tile, "customfield1"),
-            "fecha_txt": _texto_del_campo(tile, "date"),
-            "url": _url_segura(html.unescape(
-                ruta if ruta.startswith("http") else URL_BASE + ruta)),
-            # Se completan en detallar():
-            "lugar": "",
-            "jornada": "",
-            "contrato": "",
-            "cierre": "",
-            "descripcion": "",
-        })
+            job_id = f"{fuente['nombre']}:{m.group(1)}"
+            if job_id in vistos:
+                continue
+
+            cargo = enlace.get_text(" ", strip=True)
+            if not cargo:
+                continue
+
+            vistos.add(job_id)
+            nuevos_en_pagina += 1
+
+            fila = _fila_contenedora(enlace)
+            contexto = re.sub(r"\s+", " ", fila.get_text(" | ", strip=True))
+
+            vacantes.append({
+                "id": job_id,
+                "cargo": html.unescape(cargo),
+                "empresa": fuente["nombre"],
+                "contexto": html.unescape(contexto),
+                "url": _url_segura(html.unescape(
+                    ruta if ruta.startswith("http") else base + ruta)),
+                # Se completan en detallar(), solo para las que calzan:
+                "lugar": "",
+                "jornada": "",
+                "contrato": "",
+                "cierre": "",
+                "fecha_txt": "",
+                "descripcion": "",
+            })
+
+        # Si la página no aportó nada nuevo, ya no hay más resultados.
+        if nuevos_en_pagina == 0:
+            break
 
     return vacantes
 
 
-# Los campos del aviso vienen seguidos, y no siempre separados por punto. Si
-# se corta "hasta el punto", un campo se come al siguiente. Por eso cada valor
-# se corta en cuanto aparece la etiqueta del campo que viene después.
-# Ojo con el orden: 'hora de cierre...' va ANTES que 'cierre...' para que gane
-# la etiqueta más larga. Y el \w* final es imprescindible: sin él, 'postulaci'
-# no cubre 'postulaciones' y el corte falla justo donde más importa.
+# Etiquetas del cuerpo del aviso. Ojo con el orden: 'hora de cierre...' va
+# ANTES que 'cierre...' para que gane la más larga. Y el \w* es imprescindible:
+# sin él, 'postulaci' no cubre 'postulaciones' y el corte falla.
 ETIQUETAS = (
     r"lugar de trabajo|jornada laboral|n[uú]mero de vacantes|"
     r"hora de cierre de postulaci\w*|cierre de postulaci\w*|"
@@ -273,12 +334,9 @@ def detallar(vacante: dict) -> dict:
     """
     Entra al aviso y completa faena, jornada, contrato y fecha de cierre.
 
-    Estos datos NO vienen en el listado; hay que pedir la página del aviso.
-    Codelco usa una plantilla fija ('Lugar de trabajo:', 'Jornada laboral:'),
-    así que se extraen por etiqueta.
-
-    Si algo falla, se devuelve la vacante tal cual: es mejor mostrarla
-    incompleta que perderla.
+    Estas etiquetas siguen la plantilla de Codelco. En los otros portales
+    puede que no existan, y está bien: los campos quedan vacíos y el
+    formateador simplemente no los muestra. Mejor incompleta que perdida.
     """
     try:
         sopa = BeautifulSoup(_pedir(vacante["url"]), "html.parser")
@@ -292,15 +350,13 @@ def detallar(vacante: dict) -> dict:
                 continue
             valor = html.unescape(m.group(1)).strip(" .,;:")
 
-            # Red de seguridad: si el "cierre" no parece una fecha, se descarta.
-            # Sin esto, un cambio de plantilla podría colar la hora ("23:59 hrs")
-            # en el lugar de la fecha sin que nadie se entere.
+            # Red de seguridad: si el "cierre" no parece fecha, se descarta.
             if campo == "cierre" and not _parece_fecha(valor):
                 continue
 
             vacante[campo] = valor
     except (requests.RequestException, ValueError) as e:
-        print(f"  No pude abrir el detalle de '{vacante['cargo']}': {e}")
+        print(f"    No pude abrir el detalle de '{vacante['cargo'][:40]}': {e}")
 
     return vacante
 
@@ -311,36 +367,31 @@ def detallar(vacante: dict) -> dict:
 
 def evaluar(vacante: dict) -> dict:
     """
-    Decide si la vacante califica y con qué puntaje.
+    Clasifica la vacante en tres niveles:
 
-    Devuelve uno de tres niveles:
-
-      "calza"   La palabra clave está en el CARGO. Es una vacante del rubro
-                que buscas. Se muestra completa.
-      "mencion" La palabra clave aparece solo en la descripción. Ojo: las
-                mineras ponen "mejora continua" como relleno en casi todos
-                sus avisos, así que esto NO significa que el cargo sea del
-                rubro. Se muestra aparte, en una línea, sin prometer nada.
+      "calza"   La palabra clave está en el CARGO. Es del rubro que buscas.
+      "mencion" Aparece solo en el resto de la fila. Ojo: las mineras ponen
+                "mejora continua" de relleno en casi todo, así que esto NO
+                significa que el cargo sea del rubro.
       "no"      No aplica.
 
-    Por qué el título manda: un "Superintendente de Fundición" puede
-    mencionar mejora continua tres veces en la descripción y aun así no ser
-    un cargo de mejora continua. El cargo es el dato duro; la descripción es
-    contexto.
+    Por qué el título manda: un "Superintendente de Fundición" puede nombrar
+    mejora continua tres veces y aun así no ser un cargo de mejora continua.
+    El cargo es el dato duro; el resto es contexto.
     """
     titulo = normalizar(vacante["cargo"])
-    cuerpo = normalizar(vacante.get("descripcion", ""))
+    resto = normalizar(vacante.get("contexto", "") + " " + vacante.get("descripcion", ""))
 
     en_titulo = [k for k in PALABRAS_CLAVE if contiene_frase(titulo, k)]
-    en_cuerpo = [k for k in PALABRAS_CLAVE if contiene_frase(cuerpo, k)]
+    en_resto = [k for k in PALABRAS_CLAVE if contiene_frase(resto, k)]
 
     vacante["hits_titulo"] = en_titulo
-    vacante["hits_cuerpo"] = en_cuerpo
-    vacante["puntaje"] = len(en_titulo) * 10 + len(en_cuerpo)
+    vacante["hits_resto"] = en_resto
+    vacante["puntaje"] = len(en_titulo) * 10 + len(en_resto)
 
     if en_titulo:
         vacante["nivel"] = "calza"
-    elif len(en_cuerpo) >= MIN_MENCIONES:
+    elif len(en_resto) >= MIN_MENCIONES:
         vacante["nivel"] = "mencion"
     else:
         vacante["nivel"] = "no"
@@ -352,10 +403,35 @@ def evaluar(vacante: dict) -> dict:
 # FORMATO
 # ---------------------------------------------------------------------------
 
+# Nombres de columna que aparecen como texto en la fila del listado. No son
+# datos, son rótulos, y hay que ignorarlos al buscar la ubicación.
+ETIQUETAS_DE_FILA = {
+    "titulo", "title", "region", "location", "ubicacion", "fecha", "date",
+    "business unit", "department", "posting start date", "id de proceso",
+    "codigo postal", "distancia", "tipo", "reset",
+}
+
+
+def _ubicacion(vacante: dict) -> str:
+    """La faena si se alcanzó a leer del aviso; si no, lo que diga la fila."""
+    if vacante["lugar"]:
+        return vacante["lugar"]
+    # De la fila del listado, quedarse con el trozo que parece ubicación.
+    # Hay que saltarse las etiquetas: la fila viene como
+    # "Región | 5ta.Reg.Valparaíso", y sin esto devolvía "Región".
+    for trozo in vacante.get("contexto", "").split(" | "):
+        limpio = trozo.strip()
+        if not limpio or normalizar(limpio) in ETIQUETAS_DE_FILA:
+            continue
+        if es_de_chile(limpio) and len(limpio) < 60 and limpio != vacante["cargo"]:
+            return limpio
+    return ""
+
+
 def resumir(vacante: dict) -> str:
     """Una línea para las menciones: cargo, dónde, y el link."""
-    ubicacion = vacante["lugar"] or vacante["region"]
-    cabeza = f"{vacante['cargo']}"
+    ubicacion = _ubicacion(vacante)
+    cabeza = f"{vacante['cargo']} ({vacante['empresa']})"
     if ubicacion:
         cabeza += f" — {ubicacion}"
     return f"{cabeza}\n  {vacante['url']}"
@@ -365,8 +441,7 @@ def formatear(vacante: dict, es_nueva: bool) -> str:
     marca = "🆕 " if es_nueva else ""
     lineas = [f"{marca}*{vacante['cargo']}*"]
 
-    ubicacion = vacante["lugar"] or vacante["region"]
-    detalle = " · ".join(x for x in [vacante["empresa"], ubicacion] if x)
+    detalle = " · ".join(x for x in [vacante["empresa"], _ubicacion(vacante)] if x)
     if detalle:
         lineas.append(detalle)
 
@@ -374,13 +449,8 @@ def formatear(vacante: dict, es_nueva: bool) -> str:
     if extra:
         lineas.append(extra)
 
-    pie = []
-    if vacante["fecha_txt"]:
-        pie.append(f"Publicado: {vacante['fecha_txt']}")
     if vacante["cierre"]:
-        pie.append(f"Cierra: {vacante['cierre']}")
-    if pie:
-        lineas.append(" · ".join(pie))
+        lineas.append(f"Cierra: {vacante['cierre']}")
 
     lineas.append(vacante["url"])
     return "\n".join(lineas)
@@ -390,11 +460,43 @@ def formatear(vacante: dict, es_nueva: bool) -> str:
 # BLOQUE PARA EL BRIEF
 # ---------------------------------------------------------------------------
 
+def recolectar() -> list:
+    """
+    Recorre todas las fuentes y devuelve las vacantes de Chile.
+
+    Si una fuente falla, se anota y se sigue con las demás. Solo si fallan
+    TODAS se levanta la excepción.
+    """
+    todas, caidas = [], []
+
+    for i, fuente in enumerate(FUENTES):
+        if i > 0:
+            time.sleep(PAUSA)
+        try:
+            crudas = listar_rmk(fuente)
+            if fuente["solo_chile"]:
+                chilenas = crudas
+            else:
+                chilenas = [v for v in crudas
+                            if es_de_chile(v["contexto"] + " " + v["cargo"])]
+            print(f"  {fuente['nombre']:14} {len(crudas):3} avisos -> "
+                  f"{len(chilenas):3} en Chile")
+            todas.extend(chilenas)
+        except Exception as e:                      # noqa: BLE001
+            print(f"  {fuente['nombre']:14} FALLO: {type(e).__name__}: {str(e)[:70]}")
+            caidas.append(fuente["nombre"])
+
+    if len(caidas) == len(FUENTES):
+        raise RuntimeError(f"Fallaron todas las fuentes: {', '.join(caidas)}")
+
+    return todas
+
+
 def bloque_vacantes(estado: dict, hoy: date) -> str:
     """
     Arma la sección de vacantes del brief.
 
-    Los domingos entrega el resumen semanal: todas las vigentes que califican,
+    Los domingos entrega el resumen semanal: todas las vigentes que calzan,
     no solo las nuevas.
     """
     estado.setdefault("vacantes_enviadas", {})
@@ -407,31 +509,28 @@ def bloque_vacantes(estado: dict, hoy: date) -> str:
         if _fecha_valida(f) and date.fromisoformat(f) > limite
     }
 
-    todas = listar_codelco()
-    print(f"Vacantes encontradas en Codelco: {len(todas)}")
-
-    # El detalle cuesta un request por aviso, así que se limita.
-    for i, vacante in enumerate(todas[:MAX_DETALLES]):
-        if i > 0:
-            time.sleep(PAUSA_ENTRE_AVISOS)
-        detallar(vacante)
-
+    todas = recolectar()
     evaluadas = [evaluar(v) for v in todas]
     evaluadas.sort(key=lambda v: v["puntaje"], reverse=True)
 
     calzan = [v for v in evaluadas if v["nivel"] == "calza"]
     menciones = [v for v in evaluadas if v["nivel"] == "mencion"]
-    print(f"Calzan en el cargo: {len(calzan)} | "
-          f"Solo mencionan en la descripcion: {len(menciones)}")
+    print(f"Total en Chile: {len(todas)} | Calzan en el cargo: {len(calzan)}"
+          f" | Menciones: {len(menciones)}")
+
+    # El detalle cuesta un request por aviso, así que solo se abren las que
+    # calzan: nunca son muchas, y son las únicas que se muestran completas.
+    for i, vacante in enumerate(calzan[:MAX_DETALLES]):
+        if i > 0:
+            time.sleep(PAUSA)
+        detallar(vacante)
 
     vistas = estado["vacantes_enviadas"]
     es_domingo = hoy.weekday() == 6
 
-    # El domingo se repasa todo lo vigente; el resto de la semana, solo lo nuevo.
     if es_domingo:
         titulo = "💼 *Resumen semanal de vacantes*"
-        principales = calzan
-        secundarias = menciones
+        principales, secundarias = calzan, menciones
     else:
         titulo = "💼 *Vacantes*"
         principales = [v for v in calzan if v["id"] not in vistas]
@@ -444,14 +543,12 @@ def bloque_vacantes(estado: dict, hoy: date) -> str:
             partes.append(formatear(vacante, es_nueva=vacante["id"] not in vistas))
         sobrantes = len(principales) - MAX_EN_MENSAJE
         if sobrantes > 0:
-            partes.append(f"…y {sobrantes} más en el portal.")
+            partes.append(f"…y {sobrantes} más en los portales.")
     elif es_domingo:
         partes.append("No hay vacantes vigentes con tu perfil en el cargo.")
     else:
         partes.append("Hoy no hay vacantes nuevas con tu perfil en el cargo.")
 
-    # Las menciones van aparte y en una línea: no son del rubro, solo nombran
-    # tus palabras clave en alguna parte del aviso.
     if MOSTRAR_MENCIONES and secundarias:
         partes.append(
             "_Solo mencionan tus palabras clave, el cargo es de otra área:_\n"
@@ -471,5 +568,4 @@ def bloque_vacantes(estado: dict, hoy: date) -> str:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    estado_prueba = {"vacantes_enviadas": {}}
-    print(bloque_vacantes(estado_prueba, datetime.now().date()))
+    print(bloque_vacantes({}, datetime.now().date()))
