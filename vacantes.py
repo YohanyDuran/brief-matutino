@@ -62,6 +62,12 @@ MAX_DETALLES = 15          # tope duro de requests de detalle por corrida
 MAX_EN_MENSAJE = 10        # tope de vacantes mostradas, según requisitos
 DIAS_RECORDAR = 30         # cuánto tiempo se recuerda una vacante ya enviada
 
+# Las que solo mencionan el perfil en la descripción van en una lista aparte,
+# de una línea cada una. Pon MOSTRAR_MENCIONES = False para no verlas nunca.
+MOSTRAR_MENCIONES = True
+MIN_MENCIONES = 2          # palabras clave distintas exigidas en la descripción
+MAX_MENCIONES = 5          # tope de menciones listadas
+
 # Perfil objetivo. Se buscan como frases completas, sin tildes y en minúscula.
 PALABRAS_CLAVE = [
     "mejora continua",
@@ -111,6 +117,23 @@ def contiene_frase(texto_normalizado: str, frase: str) -> bool:
     """
     patron = r"\b" + re.escape(frase).replace(r"\ ", r"\s+") + r"\b"
     return re.search(patron, texto_normalizado) is not None
+
+
+def _url_segura(url: str) -> str:
+    """
+    Deja la URL en una forma que WhatsApp y Telegram reconozcan entera.
+
+    Los avisos de Codelco incluyen nombres como "Bernardo O'Higgins". Si el
+    apóstrofo va crudo, WhatsApp corta el enlace ahí y el link queda inútil.
+    Lo mismo con espacios, comillas y paréntesis. Se codifican de vuelta.
+    """
+    reemplazos = {
+        "'": "%27", '"': "%22", " ": "%20",
+        "(": "%28", ")": "%29", "<": "%3C", ">": "%3E",
+    }
+    for crudo, codificado in reemplazos.items():
+        url = url.replace(crudo, codificado)
+    return url
 
 
 def _fecha_valida(texto: str) -> bool:
@@ -211,8 +234,8 @@ def listar_codelco() -> list:
             "region": _texto_del_campo(tile, "customfield2"),
             "proceso": _texto_del_campo(tile, "customfield1"),
             "fecha_txt": _texto_del_campo(tile, "date"),
-            "url": html.unescape(ruta if ruta.startswith("http")
-                                 else URL_BASE + ruta),
+            "url": _url_segura(html.unescape(
+                ruta if ruta.startswith("http") else URL_BASE + ruta)),
             # Se completan en detallar():
             "lugar": "",
             "jornada": "",
@@ -290,13 +313,20 @@ def evaluar(vacante: dict) -> dict:
     """
     Decide si la vacante califica y con qué puntaje.
 
-    Reglas, según el perfil objetivo del proyecto:
-      - El título pesa mucho más que la descripción.
-      - Califica si pega en el TÍTULO, o si pega en DOS palabras clave
-        distintas en la descripción.
+    Devuelve uno de tres niveles:
 
-    Esa segunda condición es la que evita los falsos positivos: un cargo
-    operativo que menciona 'productividad' una vez de pasada no califica.
+      "calza"   La palabra clave está en el CARGO. Es una vacante del rubro
+                que buscas. Se muestra completa.
+      "mencion" La palabra clave aparece solo en la descripción. Ojo: las
+                mineras ponen "mejora continua" como relleno en casi todos
+                sus avisos, así que esto NO significa que el cargo sea del
+                rubro. Se muestra aparte, en una línea, sin prometer nada.
+      "no"      No aplica.
+
+    Por qué el título manda: un "Superintendente de Fundición" puede
+    mencionar mejora continua tres veces en la descripción y aun así no ser
+    un cargo de mejora continua. El cargo es el dato duro; la descripción es
+    contexto.
     """
     titulo = normalizar(vacante["cargo"])
     cuerpo = normalizar(vacante.get("descripcion", ""))
@@ -307,7 +337,13 @@ def evaluar(vacante: dict) -> dict:
     vacante["hits_titulo"] = en_titulo
     vacante["hits_cuerpo"] = en_cuerpo
     vacante["puntaje"] = len(en_titulo) * 10 + len(en_cuerpo)
-    vacante["califica"] = bool(en_titulo) or len(en_cuerpo) >= 2
+
+    if en_titulo:
+        vacante["nivel"] = "calza"
+    elif len(en_cuerpo) >= MIN_MENCIONES:
+        vacante["nivel"] = "mencion"
+    else:
+        vacante["nivel"] = "no"
 
     return vacante
 
@@ -315,6 +351,15 @@ def evaluar(vacante: dict) -> dict:
 # ---------------------------------------------------------------------------
 # FORMATO
 # ---------------------------------------------------------------------------
+
+def resumir(vacante: dict) -> str:
+    """Una línea para las menciones: cargo, dónde, y el link."""
+    ubicacion = vacante["lugar"] or vacante["region"]
+    cabeza = f"{vacante['cargo']}"
+    if ubicacion:
+        cabeza += f" — {ubicacion}"
+    return f"{cabeza}\n  {vacante['url']}"
+
 
 def formatear(vacante: dict, es_nueva: bool) -> str:
     marca = "🆕 " if es_nueva else ""
@@ -371,39 +416,51 @@ def bloque_vacantes(estado: dict, hoy: date) -> str:
             time.sleep(PAUSA_ENTRE_AVISOS)
         detallar(vacante)
 
-    califican = [evaluar(v) for v in todas]
-    califican = [v for v in califican if v["califica"]]
-    califican.sort(key=lambda v: v["puntaje"], reverse=True)
-    print(f"Califican por perfil: {len(califican)}")
+    evaluadas = [evaluar(v) for v in todas]
+    evaluadas.sort(key=lambda v: v["puntaje"], reverse=True)
+
+    calzan = [v for v in evaluadas if v["nivel"] == "calza"]
+    menciones = [v for v in evaluadas if v["nivel"] == "mencion"]
+    print(f"Calzan en el cargo: {len(calzan)} | "
+          f"Solo mencionan en la descripcion: {len(menciones)}")
 
     vistas = estado["vacantes_enviadas"]
-    nuevas = [v for v in califican if v["id"] not in vistas]
-
     es_domingo = hoy.weekday() == 6
 
+    # El domingo se repasa todo lo vigente; el resto de la semana, solo lo nuevo.
     if es_domingo:
         titulo = "💼 *Resumen semanal de vacantes*"
-        mostrar = califican
+        principales = calzan
+        secundarias = menciones
     else:
         titulo = "💼 *Vacantes*"
-        mostrar = nuevas
-
-    if not mostrar:
-        if es_domingo:
-            return f"{titulo}\nNo hay vacantes vigentes que calcen con tu perfil."
-        return f"{titulo}\nHoy no hay vacantes nuevas para tu perfil."
+        principales = [v for v in calzan if v["id"] not in vistas]
+        secundarias = [v for v in menciones if v["id"] not in vistas]
 
     partes = [titulo]
-    for vacante in mostrar[:MAX_EN_MENSAJE]:
-        partes.append(formatear(vacante, es_nueva=vacante["id"] not in vistas))
 
-    sobrantes = len(mostrar) - MAX_EN_MENSAJE
-    if sobrantes > 0:
-        partes.append(f"…y {sobrantes} más. Revisa el portal para verlas todas.")
+    if principales:
+        for vacante in principales[:MAX_EN_MENSAJE]:
+            partes.append(formatear(vacante, es_nueva=vacante["id"] not in vistas))
+        sobrantes = len(principales) - MAX_EN_MENSAJE
+        if sobrantes > 0:
+            partes.append(f"…y {sobrantes} más en el portal.")
+    elif es_domingo:
+        partes.append("No hay vacantes vigentes con tu perfil en el cargo.")
+    else:
+        partes.append("Hoy no hay vacantes nuevas con tu perfil en el cargo.")
 
-    # Se marcan como enviadas DESPUÉS de armar el texto, para que el 🆕 salga
+    # Las menciones van aparte y en una línea: no son del rubro, solo nombran
+    # tus palabras clave en alguna parte del aviso.
+    if MOSTRAR_MENCIONES and secundarias:
+        partes.append(
+            "_Solo mencionan tus palabras clave, el cargo es de otra área:_\n"
+            + "\n".join(f"• {resumir(v)}" for v in secundarias[:MAX_MENCIONES])
+        )
+
+    # Se marcan como vistas DESPUÉS de armar el texto, para que el 🆕 salga
     # bien en este mensaje.
-    for vacante in mostrar[:MAX_EN_MENSAJE]:
+    for vacante in principales[:MAX_EN_MENSAJE] + secundarias[:MAX_MENCIONES]:
         vistas[vacante["id"]] = hoy.isoformat()
 
     return "\n\n".join(partes)
