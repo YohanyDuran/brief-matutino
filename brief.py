@@ -8,9 +8,7 @@ Arma y envía por Telegram y WhatsApp un mensaje diario con:
   2. Clima del día (Open-Meteo, gratis y sin API key)
   3. Frase motivadora (sin repetir en 60 días)
   4. Palabra del día (sin repetir en 60 días)
-
-La sección de vacantes llega en la Fase 3. El bloque ya está reservado
-al final del mensaje para que puedas ver dónde va a encajar.
+  5. Vacantes laborales que calzan con el perfil (módulo vacantes.py)
 
 FILOSOFÍA DE ERRORES: si una fuente falla, el mensaje SE ENVÍA IGUAL y
 avisa qué falló. Nunca se cae entero por un pedazo.
@@ -25,6 +23,14 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
+
+# El módulo de vacantes es opcional a propósito: si falta una dependencia,
+# el brief tiene que seguir saliendo con los otros bloques.
+try:
+    from vacantes import bloque_vacantes
+except ImportError as _e:                        # noqa: BLE001
+    bloque_vacantes = None
+    print(f"Aviso: el módulo de vacantes no está disponible ({_e})")
 
 # ---------------------------------------------------------------------------
 # CONFIGURACIÓN — lo único que necesitas tocar
@@ -404,19 +410,20 @@ def main() -> int:
     partes = [bloque_fecha(ahora)]
     fallidas = []
 
-    for nombre, funcion in [
+    bloques = [
         ("Clima", lambda: bloque_clima()),
         ("Frase del día", lambda: bloque_frase(estado, hoy)),
         ("Palabra del día", lambda: bloque_palabra(estado, hoy)),
-    ]:
+    ]
+    if bloque_vacantes is not None:
+        bloques.append(("Vacantes", lambda: bloque_vacantes(estado, hoy)))
+
+    for nombre, funcion in bloques:
         try:
             partes.append(funcion())
         except Exception as e:                      # noqa: BLE001
             print(f"Falló el bloque '{nombre}': {e}")
             fallidas.append(nombre)
-
-    # Reservado para la Fase 3: acá se inserta la sección de vacantes.
-    # partes.append(bloque_vacantes(estado, hoy))
 
     if fallidas:
         partes.append("⚠️ No pude obtener: " + ", ".join(fallidas))
